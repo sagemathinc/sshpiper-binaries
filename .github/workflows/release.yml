@@ -79,7 +79,8 @@ jobs:
             echo "== ldd =="
             ldd /out/dropbearmulti || true
             echo "== execute =="
-            /out/dropbearmulti -h >/dev/null
+            /out/dropbear -h >/dev/null
+            /out/dropbearkey -h >/dev/null
           '
 
       - name: Upload artifact (tarballs)
