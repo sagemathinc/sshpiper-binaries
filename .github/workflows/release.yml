@@ -39,7 +39,7 @@ jobs:
           DROPBEAR_VERSION: ${{ env.DROPBEAR_VERSION }}
           ZIG_VERSION: ${{ env.ZIG_VERSION }}
           JOBS: ${{ env.JOBS }}
-        run: build.sh
+        run: ./build.sh
 
       - name: Show outputs
         run: |
