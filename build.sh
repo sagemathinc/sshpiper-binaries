@@ -60,18 +60,17 @@ LDFLAGS="-static -no-pie" \
   --enable-bundled-libtom \
   --enable-static
 
-echo "Building dropbearmulti…"
-make -j "${JOBS}" PROGRAMS="dropbear dropbearkey" STATIC=1 MULTI=1
+echo "Building dropbear…"
+make -j "${JOBS}" PROGRAMS="dropbear dbclient dropbearkey dropbearconvert scp" STATIC=1
 
 # --- Package ----------------------------------------------------------------
-[[ -x ./dropbearmulti ]] || { echo "Build failed: dropbearmulti missing"; exit 1; }
-strip ./dropbearmulti || true
+[[ -x ./dropbear ]] || { echo "Build failed: dropbear missing"; exit 1; }
+strip ./drop* dbclient scp || true
 
 # Stage files (with symlinks) inside dropbear-${TARGET}/
 stage_dir="${builddir}/stage/dropbear-${TARGET}"
 mkdir -p "${stage_dir}"
-cp ./dropbearmulti "${stage_dir}/"
-( cd "${stage_dir}" && ln -sf dropbearmulti dropbear && ln -sf dropbearmulti dropbearkey )
+cp ./dropbear* dbclient scp "${stage_dir}/"
 
 # Produce dropbear-${TARGET}.tar.xz in the original working dir
 out_tar="${workdir}/dropbear-${TARGET}.tar.xz"

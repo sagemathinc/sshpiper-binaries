@@ -20,18 +20,17 @@ Extracting one yields:
 
 ```
 dropbear-x86_64-linux-musl/
-  dropbearmulti
-  dropbear -> dropbearmulti
-  dropbearkey -> dropbearmulti
+  dropbear
+  dropbearkey
+  dropbearconvert
+  dbclient
+  scp
 ```
 
-`dropbearmulti` is a multi-call binary. Depending on `argv[0]`, it runs as
-either `dropbear` (the server) or `dropbearkey` (key generator).
-
-To install, copy the three files somewhere on your `PATH`, e.g.:
+To install, copy the two files somewhere on your `PATH`, e.g.:
 
 ```sh
-sudo cp dropbearmulti dropbear dropbearkey /usr/local/bin/
+sudo cp dropbear* /usr/local/bin/
 ```
 
 ## Basic Dropbear Tutorial
@@ -68,3 +67,4 @@ this repo. You can rerun the same process yourself to verify results.
   resource-constrained environments.
 * **Security:** As with any SSH server, configure carefully (authorized\_keys,
   permissions, etc.).
+

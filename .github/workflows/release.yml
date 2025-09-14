@@ -75,12 +75,11 @@ jobs:
             set -eu
             apk add --no-cache file >/dev/null 2>&1 || true
             echo "== file =="
-            file /out/dropbearmulti || true
+            file /out/dropbear || true
             echo "== ldd =="
-            ldd /out/dropbearmulti || true
+            ldd /out/dropbear || true
             echo "== execute =="
             /out/dropbear -h >/dev/null
-            /out/dropbearkey -h >/dev/null
           '
 
       - name: Upload artifact (tarballs)
