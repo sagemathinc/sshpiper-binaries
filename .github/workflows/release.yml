@@ -68,10 +68,10 @@ jobs:
           esac
 
           # Path inside testdir
-          BIN="testdir/dropbear-${TARGET}/dropbearmulti"
+          BIN="testdir/dropbear-${TARGET}"
 
           # Run Alpine container of matching arch with our binary mounted at /out
-          docker run --rm --platform "${plat}" -v "$PWD/${BIN}:/out/dropbearmulti:ro" alpine:3 sh -lc '
+          docker run --rm --platform "${plat}" -v "$PWD/${BIN}:/out:ro" alpine:3 sh -lc '
             set -eu
             apk add --no-cache file >/dev/null 2>&1 || true
             echo "== file =="
