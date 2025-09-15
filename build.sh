@@ -22,32 +22,41 @@ echo "[*] Clean build dir"
 rm -rf "${BUILD_DIR}"
 mkdir -p "${SRC_DIR}" "${OUT_DIR}" "${STAGE_DIR}"
 
+# ----- Clone sshpiper and checkout the desired tag -----
 echo "[*] Cloning sshpiper upstream…"
-git -C "${SRC_DIR}" clone --depth 1 "${SSHPIPER_REPO}"
-
-echo "[*] Cloning REST plugin repo…"
-git -C "${SRC_DIR}" clone --depth 1 "${REST_PLUGIN_REPO}"
+git -C "${SRC_DIR}" clone "${SSHPIPER_REPO}"
 
 SSHPIPER_SRC="${SRC_DIR}/sshpiper"
-PLUGIN_ROOT="${SRC_DIR}/docker-sshpiper/build/plugin"
-
-# ----- Determine VERSION from latest v* tag (fallback v0.0.0) -----
 pushd "${SSHPIPER_SRC}" >/dev/null
-  git submodule update --init --recursive
-  # make sure tags exist in this shallow clone
+  # Determine VERSION:
+  # 1) explicit VERSION env
+  # 2) GitHub Actions ref (tag) like v1.5.0
+  # 3) latest v* tag in repo
   git fetch --tags --force --prune >/dev/null 2>&1 || true
-  VERSION="${VERSION:-}"
+  VERSION="${VERSION:-${GITHUB_REF_NAME:-}}"
   if [[ -z "${VERSION}" ]]; then
     VERSION="$(git tag --list 'v*' --sort=-v:refname | head -n1 || true)"
   fi
   if [[ -z "${VERSION}" ]]; then
+    echo "[!] No version tag found; defaulting to v0.0.0 (building current HEAD)"
     VERSION="v0.0.0"
+  else
+    echo "[*] Checking out tag ${VERSION}"
+    git checkout -q "refs/tags/${VERSION}"
   fi
+
+  # Submodules at this tag
+  git submodule update --init --recursive
   GIT_SHA="$(git rev-parse --short HEAD || true)"
-  echo "[*] Using VERSION=${VERSION} (HEAD=${GIT_SHA})"
+  echo "[*] Using VERSION=${VERSION} (commit ${GIT_SHA})"
 popd >/dev/null
 
-# ----- Per-plugin go.mod (repo has no top-level module) -----
+# ----- Clone REST plugin repo (third-party) -----
+echo "[*] Cloning REST plugin repo…"
+git -C "${SRC_DIR}" clone --depth 1 "${REST_PLUGIN_REPO}"
+PLUGIN_ROOT="${SRC_DIR}/docker-sshpiper/build/plugin"
+
+# The plugin repo isn’t a Go module at root; init per-plugin modules
 prepare_plugin_mod () {
   local dir="$1" modname="$2"
   if [[ ! -f "${dir}/go.mod" ]]; then
@@ -59,7 +68,8 @@ prepare_plugin_mod () {
   fi
 }
 prepare_plugin_mod "${PLUGIN_ROOT}/rest_auth"      "github.com/11notes/rest_auth"
-prepare_plugin_mod "${PLUGIN_ROOT}/rest_challenge" "github.com/11notes/rest_challenge"
+# If you ever want rest_challenge too, uncomment the next line:
+# prepare_plugin_mod "${PLUGIN_ROOT}/rest_challenge" "github.com/11notes/rest_challenge"
 
 # ----- Build one OS/arch tuple -----
 build_target () {
@@ -75,7 +85,7 @@ build_target () {
 
   local ldflags="-s -w -X main.version=${VERSION} -X main.date=${DATE_UTC}"
 
-  # sshpiperd (daemon)
+  # sshpiperd (daemon) at the checked-out tag
   echo "    - sshpiperd"
   (
     cd "${SSHPIPER_SRC}"
@@ -84,7 +94,7 @@ build_target () {
       -o "${target_dir}/sshpiperd${ext}" ./cmd/sshpiperd
   )
 
-  # rest_auth plugin → sshpiperd-rest
+  # rest_auth plugin → renamed to sshpiperd-rest
   echo "    - rest_auth → sshpiperd-rest"
   (
     cd "${PLUGIN_ROOT}/rest_auth"
@@ -93,7 +103,7 @@ build_target () {
       -o "${target_dir}/sshpiperd-rest${ext}" .
   )
 
-  # Stage a versioned directory that matches README format
+  # Versioned package dir (matches README)
   local base="${RELEASE_NAME_PREFIX}-${VERSION}-${goos}-${goarch}"
   local pkg_dir="${STAGE_DIR}/${base}"
   rm -rf "${pkg_dir}"
