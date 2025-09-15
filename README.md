@@ -112,6 +112,12 @@ Once it is running, start sshpiperd as follows:
 
 Binaries are built by [build.sh](./build.sh) and GitHub Actions workflows in this repo. You can rerun the same process yourself to verify results.
 
+Github actions kicks off a build when we push a tag. It uses the tag from the upstream sshpiper repo, instead of building HEAD.
+
+```sh
+git tag --force v1.5.0 && git push origin v1.5.0 --force
+```
+
 ## Notes
 
 - These builds are intended for lightweight use in containers or resource\-constrained environments.
