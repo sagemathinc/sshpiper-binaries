@@ -1,84 +1,123 @@
 #!/usr/bin/env bash
-set -ev
+set -euo pipefail
 
-# ---- Config ----------------------------------------------------------------
-: "${DROPBEAR_VERSION:=2025.88}"   # Dropbear release to build
-: "${ZIG_VERSION:=0.15.1}"         # Zig to use for musl cross static
-: "${JOBS:=8}"                     # parallel make
+# =======================
+# Config (override via env)
+# =======================
+: "${MATRIX_GOOS:=linux darwin windows}"
+: "${MATRIX_GOARCH:=amd64 arm64}"
+: "${RELEASE_NAME_PREFIX:=sshpiper}"
+: "${CGO_ENABLED_DEFAULT:=0}"
+: "${SSHPIPER_REPO:=https://github.com/tg123/sshpiper}"
+: "${REST_PLUGIN_REPO:=https://github.com/11notes/docker-sshpiper}"
 
-# TARGET may be provided by CI matrix (e.g., x86_64-linux-musl, aarch64-linux-musl
-if [[ -z "${TARGET:-}" ]]; then
-  case "$(uname -m)" in
-    x86_64)  TARGET="x86_64-linux-musl" ;;
-    aarch64) TARGET="aarch64-linux-musl" ;;
-    *) echo "Unsupported arch $(uname -m). Set TARGET explicitly."; exit 1 ;;
-  esac
-fi
+ROOT="$(pwd)"
+BUILD_DIR="${ROOT}/build"
+SRC_DIR="${BUILD_DIR}/src"
+OUT_DIR="${BUILD_DIR}/out"
+STAGE_DIR="${BUILD_DIR}/stage"
+DATE_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-workdir="$(pwd)"
-builddir="$(mktemp -d)"
-trap 'rm -rf "$builddir"' EXIT
+echo "[*] Clean build dir"
+rm -rf "${BUILD_DIR}"
+mkdir -p "${SRC_DIR}" "${OUT_DIR}" "${STAGE_DIR}"
 
-zig_pkg_arch=`uname -m`
-zig_pkg="zig-${zig_pkg_arch}-linux-${ZIG_VERSION}.tar.xz"
-zig_url="https://ziglang.org/download/${ZIG_VERSION}/${zig_pkg}"
+echo "[*] Cloning sshpiper upstream…"
+git -C "${SRC_DIR}" clone --depth 1 "${SSHPIPER_REPO}"
 
-echo "Downloading Zig ${ZIG_VERSION} for ${zig_pkg_arch}..."
-curl -fsSL "$zig_url" -o "${builddir}/${zig_pkg}"
-echo "Extracting Zig to $builddir..."
-tar -C "$builddir" -xJf "${builddir}/${zig_pkg}"
-echo "Extracted zig"
+echo "[*] Cloning REST plugin repo…"
+git -C "${SRC_DIR}" clone --depth 1 "${REST_PLUGIN_REPO}"
 
-zig_root="$(tar -tf "${builddir}/${zig_pkg}" | head -1 | cut -d/ -f1)"
-ZIG_BIN="${builddir}/${zig_root}/zig"
-export PATH="${builddir}/${zig_root}:$PATH"
-echo "Using Zig at: ${ZIG_BIN}"
-"${ZIG_BIN}" version
+SSHPIPER_SRC="${SRC_DIR}/sshpiper"
+PLUGIN_ROOT="${SRC_DIR}/docker-sshpiper/build/plugin"
 
-# --- Get Dropbear -----------------------------------------------------------
-dropbear_tar="dropbear-${DROPBEAR_VERSION}.tar.bz2"
-dropbear_url="https://matt.ucc.asn.au/dropbear/releases/${dropbear_tar}"
+# ----- Determine VERSION from latest v* tag (fallback v0.0.0) -----
+pushd "${SSHPIPER_SRC}" >/dev/null
+  git submodule update --init --recursive
+  # make sure tags exist in this shallow clone
+  git fetch --tags --force --prune >/dev/null 2>&1 || true
+  VERSION="${VERSION:-}"
+  if [[ -z "${VERSION}" ]]; then
+    VERSION="$(git tag --list 'v*' --sort=-v:refname | head -n1 || true)"
+  fi
+  if [[ -z "${VERSION}" ]]; then
+    VERSION="v0.0.0"
+  fi
+  GIT_SHA="$(git rev-parse --short HEAD || true)"
+  echo "[*] Using VERSION=${VERSION} (HEAD=${GIT_SHA})"
+popd >/dev/null
 
-echo "Downloading Dropbear ${DROPBEAR_VERSION}..."
-curl -fsSL "$dropbear_url" -o "${builddir}/${dropbear_tar}"
-echo "Extracting Dropbear..."
-tar -C "$builddir" -xjf "${builddir}/${dropbear_tar}"
-cd "${builddir}/dropbear-${DROPBEAR_VERSION}"
+# ----- Per-plugin go.mod (repo has no top-level module) -----
+prepare_plugin_mod () {
+  local dir="$1" modname="$2"
+  if [[ ! -f "${dir}/go.mod" ]]; then
+    echo "[*] go mod init in ${dir} (${modname})"
+    pushd "${dir}" >/dev/null
+      go mod init "${modname}"
+      go mod tidy
+    popd >/dev/null
+  fi
+}
+prepare_plugin_mod "${PLUGIN_ROOT}/rest_auth"      "github.com/11notes/rest_auth"
+prepare_plugin_mod "${PLUGIN_ROOT}/rest_challenge" "github.com/11notes/rest_challenge"
 
-# --- Build (static, musl) ---------------------------------------------------
-echo "Cleaning previous build (if any)…"
-make clean || true
+# ----- Build one OS/arch tuple -----
+build_target () {
+  local goos="$1" goarch="$2"
+  local cgo="${CGO_ENABLED_DEFAULT}"
 
-echo "Configuring for ${TARGET}…"
-CC="${ZIG_BIN} cc -target ${TARGET}" \
-CFLAGS="-Os -fno-pie" \
-LDFLAGS="-static -no-pie" \
-./configure \
-  --host="${TARGET}" \
-  --disable-pam \
-  --disable-zlib \
-  --enable-bundled-libtom \
-  --enable-static
+  echo "[*] Building ${goos}/${goarch}"
+  local ext=""
+  if [[ "${goos}" == "windows" ]]; then ext=".exe"; fi
 
-echo "Building dropbear…"
-make -j "${JOBS}" PROGRAMS="dropbear dbclient dropbearkey dropbearconvert scp" STATIC=1
+  local target_dir="${OUT_DIR}/${goos}-${goarch}"
+  mkdir -p "${target_dir}"
 
-# --- Package ----------------------------------------------------------------
-[[ -x ./dropbear ]] || { echo "Build failed: dropbear missing"; exit 1; }
-strip ./drop* dbclient scp || true
+  local ldflags="-s -w -X main.version=${VERSION} -X main.date=${DATE_UTC}"
 
-# Stage files (with symlinks) inside dropbear-${TARGET}/
-stage_dir="${builddir}/stage/dropbear-${TARGET}"
-mkdir -p "${stage_dir}"
-cp ./dropbear* dbclient scp "${stage_dir}/"
+  # sshpiperd (daemon)
+  echo "    - sshpiperd"
+  (
+    cd "${SSHPIPER_SRC}"
+    CGO_ENABLED="${cgo}" GOOS="${goos}" GOARCH="${goarch}" \
+      go build -tags full -trimpath -ldflags "${ldflags}" \
+      -o "${target_dir}/sshpiperd${ext}" ./cmd/sshpiperd
+  )
 
-# Produce dropbear-${TARGET}.tar.xz in the original working dir
-out_tar="${workdir}/dropbear-${TARGET}.tar.xz"
-echo "Creating ${out_tar}…"
-tar -C "${builddir}/stage" -cJf "${out_tar}" "dropbear-${TARGET}"
+  # rest_auth plugin → sshpiperd-rest
+  echo "    - rest_auth → sshpiperd-rest"
+  (
+    cd "${PLUGIN_ROOT}/rest_auth"
+    CGO_ENABLED="${cgo}" GOOS="${goos}" GOARCH="${goarch}" \
+      go build -trimpath -ldflags "-s -w" \
+      -o "${target_dir}/sshpiperd-rest${ext}" .
+  )
 
-# SHA256 for convenience
-echo "SHA256: "
-sha256sum "${out_tar}" | tee "${out_tar}.SHA256"
+  # Stage a versioned directory that matches README format
+  local base="${RELEASE_NAME_PREFIX}-${VERSION}-${goos}-${goarch}"
+  local pkg_dir="${STAGE_DIR}/${base}"
+  rm -rf "${pkg_dir}"
+  mkdir -p "${pkg_dir}"
+  cp "${target_dir}/sshpiperd${ext}" "${pkg_dir}/"
+  cp "${target_dir}/sshpiperd-rest${ext}" "${pkg_dir}/"
 
-echo "Done: ${out_tar}"
+  # .tar.xz package
+  local tarball="${OUT_DIR}/${base}.tar.xz"
+  echo "    - packaging ${tarball}"
+  ( cd "${STAGE_DIR}" && tar -cJf "${tarball}" "$(basename "${pkg_dir}")" )
+
+  # checksum
+  ( cd "${OUT_DIR}" && sha256sum "$(basename "${tarball}")" >> SHA256SUMS.txt )
+}
+
+# ----- Build matrix -----
+: > "${OUT_DIR}/SHA256SUMS.txt"
+for goos in ${MATRIX_GOOS}; do
+  for goarch in ${MATRIX_GOARCH}; do
+    build_target "${goos}" "${goarch}"
+  done
+done
+
+echo "[*] Artifacts in ${OUT_DIR}:"
+ls -lh "${OUT_DIR}"
+echo "[*] Done."

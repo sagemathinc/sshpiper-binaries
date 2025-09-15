@@ -1,70 +1,119 @@
-# Statically Linked [Dropbear SSH](https://github.com/mkj/dropbear) Binaries (built with Zig)
+# sshpiper binaries with REST plugin
 
-This repo publishes prebuilt **musl-linked static ELF binaries** of Dropbear,
-built automatically from upstream [mkj/dropbear](https://github.com/mkj/dropbear)
-using [Zig](https://ziglang.org/) for cross-compilation.
+[**sshpiper**](https://github.com/tg123/sshpiper) is a reverse proxy for sshd. All protocols, including ssh, scp, port forwarding, and running commands on top of ssh are fully supported.
 
-These binaries should run on virtually any modern Linux distribution with no
-external dependencies. Builds include **X11 forwarding support**.
+This repo publishes a recipe for sshpiper binaries, built from [upstream](https://github.com/tg123/sshpiper) and including only the [REST plugin](https://github.com/11notes/docker-sshpiper). The REST plugin is by far the most flexible and useful, but it is not officially included upstream.
 
 ## Contents
 
-Each release provides these tarballs:
+Each release provides a tarball per platform, named like:
 
 ```
-dropbear-x86_64-linux-musl.tar.xz
-dropbear-aarch64-linux-musl.tar.xz
+sshpiper-v<version>-<os>-<arch>.tar.xz
 ```
 
-Extracting one yields:
+For example:
 
 ```
-dropbear-x86_64-linux-musl/
-  dropbear
-  dropbearkey
-  dropbearconvert
-  dbclient
-  scp
+sshpiper-v1.5.0-linux-amd64.tar.xz
 ```
 
-To install, copy the two files somewhere on your `PATH`, e.g.:
+Extracting it yields a versioned directory:
+
+```
+sshpiper-v1.5.0-linux-amd64/
+  sshpiperd
+  sshpiperd-rest
+```
+
+To install, copy both files somewhere on your `PATH`, e.g.:
 
 ```sh
-sudo cp dropbear* /usr/local/bin/
+sudo cp sshpiperd* /usr/local/bin/
 ```
 
-## Basic Dropbear Tutorial
+## Tutorial
 
-Generate a host key:
+Suppose you have two ssh servers on localhost at ports 3089 and 5077. You can connect to them directly via:
 
 ```sh
-mkdir -p ~/dropbear-test
-cd ~/dropbear-test
-dropbearkey -t ed25519 -f key
+ssh user@localhost -p 3089
+ssh user@localhost -p 5077
 ```
 
-Start the server in the foreground on port 2222:
+The following Node.js script creates a simple HTTP server. With it, connecting as `ssh test@localhost -p 2222` will proxy to port 3089, while any other username (e.g. `ssh anything-but-test@localhost -p 2222`) will proxy to port 5077.
 
-```sh
-dropbear -F -E -p 2222 -r key
+**Key flow:**
+
+- `authorizedKeys`: controls which _client_ keys are accepted by sshpiper.
+- `privateKey`: is the identity sshpiper uses to log into the _upstream_ server. This mapping step is why sshpiper must terminate and re-encrypt SSH traffic.
+
+```js
+// server.js
+import express from "express";
+import fs from "fs";
+
+const app = express();
+app.use(express.json());
+
+function portForProject(id) {
+  if (id == "test") {
+    return 3089;
+  }
+  return 5077;
+}
+
+app.get("/auth/:id", (req, res) => {
+  // authorizedKeys = how we trust incoming connections to sshpiper
+  const authorizedKeys = fs.readFileSync("authorized_keys", "utf8");
+  // privateKey = how sshpiper connects out to upstream
+  const privateKey = fs.readFileSync("ed25519", "utf8");
+
+  const { id } = req.params;
+  const port = portForProject(id);
+
+  res.json({
+    user: "user",
+    host: `127.0.0.1:${port}`,
+    authorizedKeys,
+    privateKey,
+  });
+});
+
+app.listen(8443, () =>
+  console.log("sshpiper auth @ http://127.0.0.1:8443/auth/:id"),
+);
 ```
 
-From another terminal, connect:
+To run the above, you need Express. Install it globally, or add it as a dependency in a project:
 
 ```sh
-ssh -p 2222 localhost
+npm install express
+```
+
+You also need to make the private key `ed25519` mentioned in the code:
+
+```sh
+ssh-keygen -t ed25519 -f ed25519 -P ""
+```
+
+Put `ed25519.pub` into the `authorized_keys` file for the two ssh servers running locally on ports 3089 and 5077, so sshpiperd can connect upstream without a password.
+
+Once it is running, start sshpiperd as follows:
+
+```sh
+./sshpiperd \
+  -i server_host_key \
+  --server-key-generate-mode notexist \
+  ./sshpiperd-rest --url http://127.0.0.1:8443/auth
 ```
 
 ## Build Reproducibility
 
-Binaries are built by [build.sh](./build.sh) and GitHub Actions workflows in
-this repo. You can rerun the same process yourself to verify results.
+Binaries are built by [build.sh](./build.sh) and GitHub Actions workflows in this repo. You can rerun the same process yourself to verify results.
 
 ## Notes
 
-* Features: X11 forwarding enabled; PAM and zlib disabled; bundled libtom used.
-* These builds are intended for lightweight use in containers or
-  resource-constrained environments.
-* **Security:** As with any SSH server, configure carefully (authorized\_keys,
-  permissions, etc.).
-
+- These builds are intended for lightweight use in containers or resource\-constrained environments.
+- Changes to `authorized_keys` are picked up on the next connection attempt; no restart of sshpiperd is required.
+- Treat your REST service as part of your security boundary: bind it to localhost or firewall it appropriately. Anyone who can hit `/auth` can potentially control sshpiper’s routing/auth decisions.

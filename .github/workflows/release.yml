@@ -1,117 +1,32 @@
-name: Build, Test & Release Dropbear Binaries
-
+name: build
 on:
   push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+    tags: ["v*"]
+  workflow_dispatch: {}
 
 jobs:
   build:
-    name: build ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-linux-musl
-          - aarch64-linux-musl
-
-    env:
-      DROPBEAR_VERSION: 2025.88
-      ZIG_VERSION: 0.15.1
-      JOBS: 8
-
+        go-version: ["1.22.x", "1.23.x"]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y curl ca-certificates tar bzip2 xz-utils autoconf automake make gcc g++
-
-      - name: Make build script executable
-        run: git update-index --chmod=+x build.sh
-
-      - name: Build static dropbearmulti (musl)
-        env:
-          TARGET: ${{ matrix.target }}
-          DROPBEAR_VERSION: ${{ env.DROPBEAR_VERSION }}
-          ZIG_VERSION: ${{ env.ZIG_VERSION }}
-          JOBS: ${{ env.JOBS }}
-        run: ./build.sh
-
-      - name: Show outputs
-        run: |
-          ls -l dropbear-*.tar.xz*
-
-      # ------- Test inside Alpine (matching architecture) -------
-      - name: Setup QEMU (for multi-arch containers)
-        uses: docker/setup-qemu-action@v3
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          platforms: all
+          go-version: ${{ matrix.go-version }}
+          cache: true
 
-      - name: Extract tarball for testing
-        run: |
-          mkdir -p testdir
-          tar -xJf "dropbear-${{ matrix.target }}.tar.xz" -C testdir
-          ls -lR testdir
+      - name: Build
+        run: bash build.sh
 
-      - name: Run tests in Alpine container (file, ldd, -h)
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          case "$TARGET" in
-            x86_64-linux-musl) plat="linux/amd64" ;;
-            aarch64-linux-musl) plat="linux/arm64" ;;
-            *) echo "Unknown TARGET $TARGET"; exit 1 ;;
-          esac
-
-          # Path inside testdir
-          BIN="testdir/dropbear-${TARGET}"
-
-          # Run Alpine container of matching arch with our binary mounted at /out
-          docker run --rm --platform "${plat}" -v "$PWD/${BIN}:/out:ro" alpine:3 sh -lc '
-            set -eu
-            apk add --no-cache file >/dev/null 2>&1 || true
-            echo "== file =="
-            file /out/dropbear || true
-            echo "== ldd =="
-            ldd /out/dropbear || true
-            echo "== execute =="
-            /out/dropbear -h >/dev/null
-          '
-
-      - name: Upload artifact (tarballs)
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dropbear-${{ matrix.target }}
+          name: sshpiper-binaries
           path: |
-            dropbear-${{ matrix.target }}.tar.xz
-            dropbear-${{ matrix.target }}.tar.xz.SHA256
-
-  release:
-    name: create github release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-
-      - name: List artifacts
-        run: ls -lR dist
-
-      - name: Create / Update Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          files: |
-            dist/**/dropbear-*.tar.xz
-            dist/**/dropbear-*.tar.xz.SHA256
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            build/out/*.tar.xz
+            build/out/SHA256SUMS.txt
